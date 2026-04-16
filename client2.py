@@ -1,24 +1,13 @@
 import asyncio
 import json
 import websockets
-from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.ciphers import rsa
 from cryptography.hazmat.primitives.ciphers.asymmetric import padding
-from cryptography.hazmat.primitives import hashes
-from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
-SERVER = "ws://localhost:8765"
-USERNAME = "Client2"
-
-async def load_keys():
-    with open("mi_llave_privada.pem", "rb") as f:
-        private_pem = f.read()
-    private_key = serialization.load_pem_private_key(private_pem, password=None)
-    
-    with open("mi_llave_publica.pem", "rb") as f:
-        public_pem = f.read()
-    public_key = serialization.load_pem_public_key(public_pem)
-    
+async def generate_keys():
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public_key = private_key.public_key()
     return private_key, public_key
 
 def get_public_key_pem(public_key):
@@ -40,7 +29,7 @@ def decrypt_message(ciphertext, private_key):
     ).decode('utf-8')
 
 async def chat():
-    private_key, my_public_key = await load_keys()
+    private_key, my_public_key = await generate_keys()
     peer_public_key = None
     
     print(f"Conectando como {USERNAME}...")
