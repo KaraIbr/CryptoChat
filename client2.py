@@ -16,6 +16,7 @@ import asyncio
 import json
 import base64
 import websockets
+import sys
 
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives import serialization, hashes
@@ -69,81 +70,119 @@ async def chat():
     fernet = None
 
     print(f"Connecting as {USERNAME}...")
-    async with websockets.connect(SERVER) as ws:
-        await ws.send(json.dumps({"type": "register", "from": USERNAME}))
-        print("Registered.")
+    try:
+        async with websockets.connect(SERVER) as ws:
+            await ws.send(json.dumps({"type": "register", "from": USERNAME}))
+            print("Registered.")
+            sys.stdout.flush()
 
-        await asyncio.sleep(0.5)  # Wait for registration to complete
-        
-        await ws.send(json.dumps({"type": "list"}))
-        response = json.loads(await ws.recv())
-        print(f"Available users: {response.get('users', [])}")
+            await asyncio.sleep(0.5)
+            
+            await ws.send(json.dumps({"type": "list"}))
+            response = json.loads(await ws.recv())
+            print(f"Available users: {response.get('users', [])}")
+            sys.stdout.flush()
 
-        async def receive_loop():
-            nonlocal peer_pub, fernet
-            async for raw in ws:
-                data = json.loads(raw)
-                t = data.get("type")
+            async def receive_loop():
+                nonlocal peer_pub, fernet
+                try:
+                    async for raw in ws:
+                        try:
+                            data = json.loads(raw)
+                            t = data.get("type")
+                            print(f"[DEBUG] Received: {t}")
+                            sys.stdout.flush()
 
-                if t == "pubkey_offer":
-                    pem = data.get("public_key_pem")
-                    if pem:
-                        peer_pub = pem_to_public_key(pem)
-                        fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+                            if t == "pubkey_offer":
+                                pem = data.get("public_key_pem")
+                                if pem:
+                                    peer_pub = pem_to_public_key(pem)
+                                    fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+
+                                    await ws.send(json.dumps({
+                                        "type": "pubkey_accept",
+                                        "from": USERNAME,
+                                        "to": PEER,
+                                        "public_key_pem": public_key_to_pem(my_pub),
+                                    }))
+                                    print("[OK] Public key received and sent mine. Secure channel ready.")
+                                    sys.stdout.flush()
+                            elif t == "pubkey_accept":
+                                pem = data.get("public_key_pem")
+                                if pem:
+                                    peer_pub = pem_to_public_key(pem)
+                                    fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+                                    print("[OK] Public key accept received. Secure channel ready.")
+                                    sys.stdout.flush()
+                            elif t == "chat":
+                                payload_b64 = data.get("payload_b64", "")
+                                if not fernet:
+                                    print("[WARN] Message received but no secure channel yet.")
+                                    sys.stdout.flush()
+                                    continue
+                                try:
+                                    ciphertext = base64.b64decode(payload_b64.encode("utf-8"))
+                                    plaintext = fernet.decrypt(ciphertext).decode("utf-8")
+                                    print(f"\n[peer] {plaintext}")
+                                    sys.stdout.flush()
+                                except Exception as e:
+                                    print(f"[ERROR] Could not decrypt: {e}")
+                                    sys.stdout.flush()
+                            elif t == "error":
+                                print(f"[SERVER ERROR] {data.get('message')}")
+                                sys.stdout.flush()
+                            elif t == "list_result":
+                                pass
+                            else:
+                                print(f"[INFO] Unknown message: {data}")
+                                sys.stdout.flush()
+                        except json.JSONDecodeError as e:
+                            print(f"[ERROR] Invalid JSON: {e}")
+                            sys.stdout.flush()
+                except websockets.exceptions.ConnectionClosed:
+                    print("[INFO] Disconnected from server")
+                    sys.stdout.flush()
+
+            async def send_loop():
+                nonlocal fernet
+                while True:
+                    try:
+                        msg = input("Message (type 'salir' to quit): ").strip()
+                        if msg.lower() == "salir":
+                            break
+                        print(f"[me] {msg}")
+                        sys.stdout.flush()
+                        if not fernet:
+                            print("No secure channel yet (waiting for ECDH/pubkey).")
+                            sys.stdout.flush()
+                            continue
+
+                        ciphertext = fernet.encrypt(msg.encode("utf-8"))
+                        payload_b64 = base64.b64encode(ciphertext).decode("utf-8")
 
                         await ws.send(json.dumps({
-                            "type": "pubkey_accept",
+                            "type": "chat",
                             "from": USERNAME,
                             "to": PEER,
-                            "public_key_pem": public_key_to_pem(my_pub),
+                            "payload_b64": payload_b64,
                         }))
-                        print("[OK] Pubkey recibida y enviada la mía. Canal seguro listo.")
-                elif t == "pubkey_accept":
-                    pem = data.get("public_key_pem")
-                    if pem:
-                        peer_pub = pem_to_public_key(pem)
-                        fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
-                        print("[OK] Pubkey accept recibida. Canal seguro listo.")
-                elif t == "chat":
-                    payload_b64 = data.get("payload_b64", "")
-                    if not fernet:
-                        print("[WARN] Mensaje recibido pero aún no hay canal seguro.")
-                        continue
-                    try:
-                        ciphertext = base64.b64decode(payload_b64.encode("utf-8"))
-                        plaintext = fernet.decrypt(ciphertext).decode("utf-8")
-                        print(f"\n[peer] {plaintext}")
+                    except EOFError:
+                        break
                     except Exception as e:
-                        print(f"[ERROR] No se pudo descifrar: {e}")
-                elif t == "error":
-                    print(f"[SERVER ERROR] {data.get('message')}")
-                elif t == "list_result":
-                    pass
-                else:
-                    print(f"[INFO] Mensaje desconocido: {data}")
+                        print(f"[ERROR] {e}")
+                        sys.stdout.flush()
+                        break
 
-        async def send_loop():
-            nonlocal fernet
-            while True:
-                msg = input("Mensaje (salir para terminar): ").strip()
-                if msg.lower() == "salir":
-                    break
-                print(f"[me] {msg}")
-                if not fernet:
-                    print("Aún no hay canal seguro (esperando ECDH/pubkey).")
-                    continue
-
-                ciphertext = fernet.encrypt(msg.encode("utf-8"))
-                payload_b64 = base64.b64encode(ciphertext).decode("utf-8")
-
-                await ws.send(json.dumps({
-                    "type": "chat",
-                    "from": USERNAME,
-                    "to": PEER,
-                    "payload_b64": payload_b64,
-                }))
-
-        await asyncio.gather(receive_loop(), send_loop())
+            await asyncio.gather(receive_loop(), send_loop())
+    except websockets.exceptions.InvalidURI:
+        print(f"[ERROR] Invalid server URL: {SERVER}")
+        sys.stdout.flush()
+    except ConnectionRefusedError:
+        print("[ERROR] Connection refused. Is the server running?")
+        sys.stdout.flush()
+    except Exception as e:
+        print(f"[ERROR] {type(e).__name__}: {e}")
+        sys.stdout.flush()
 
 
 if __name__ == "__main__":
