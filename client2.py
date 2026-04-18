@@ -68,14 +68,16 @@ async def chat():
     peer_pub = None
     fernet = None
 
-    print(f"Conectando como {USERNAME}...")
+    print(f"Connecting as {USERNAME}...")
     async with websockets.connect(SERVER) as ws:
         await ws.send(json.dumps({"type": "register", "from": USERNAME}))
-        print("Registrado.")
+        print("Registered.")
 
+        await asyncio.sleep(0.5)  # Wait for registration to complete
+        
         await ws.send(json.dumps({"type": "list"}))
         response = json.loads(await ws.recv())
-        print(f"Usuarios disponibles: {response.get('users', [])}")
+        print(f"Available users: {response.get('users', [])}")
 
         async def receive_loop():
             nonlocal peer_pub, fernet

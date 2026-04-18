@@ -18,7 +18,7 @@ import asyncio
 import json
 import websockets
 
-HOST = "0.0.0.0"
+HOST = "127.0.0.1"
 PORT = 8765
 
 # users: username -> websocket
@@ -37,6 +37,8 @@ async def manejar_cliente(websocket, path):
                 datos = json.loads(mensaje)
                 tipo = datos.get("type")
                 
+                print(f"[DEBUG] Received: {tipo} from {datos.get('from')} to {datos.get('to')}")
+                
                 # Solo leemoscabecera JSON para enrutar
                 # El resto (payload, public_key_pem) se reenvía intacto
                 
@@ -52,11 +54,13 @@ async def manejar_cliente(websocket, path):
                         "type": "list_result",
                         "users": list(usuarios_conectados.keys())
                     }
+                    print(f"[DEBUG] Sending user list: {respuesta}")
                     await websocket.send(json.dumps(respuesta))
                     
                 elif tipo in ("pubkey_offer", "pubkey_accept"):
                     # Reenviar llave pública al destinatario (servidor NO la toca)
                     destinatario = datos.get("to")
+                    print(f"[DEBUG] Forwarding {tipo} to {destinatario}")
                     if destinatario and destinatario in usuarios_conectados:
                         await usuarios_conectados[destinatario].send(mensaje)
                     else:
@@ -67,6 +71,7 @@ async def manejar_cliente(websocket, path):
                 elif tipo == "chat":
                     # Reenviar mensaje cifrado al destinatario (servidor NO lo toca)
                     destinatario = datos.get("to")
+                    print(f"[DEBUG] Forwarding chat to {destinatario}")
                     if destinatario and destinatario in usuarios_conectados:
                         await usuarios_conectados[destinatario].send(mensaje)
                     else:
@@ -77,9 +82,13 @@ async def manejar_cliente(websocket, path):
                     error = {"type": "error", "message": f"Tipo desconocido: {tipo}"}
                     await websocket.send(json.dumps(error))
                     
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] JSON inválido: {e}")
                 error = {"type": "error", "message": "JSON inválido"}
                 await websocket.send(json.dumps(error))
+            except Exception as e:
+                print(f"[ERROR] Server error: {e}")
+                raise
                 
     except websockets.exceptions.ConnectionClosed:
         pass
@@ -90,7 +99,7 @@ async def manejar_cliente(websocket, path):
             print(f"[-] {usuario_actual} desconectado")
 
 async def main():
-    print(f"Servidor KimoChat escuchando en {HOST}:{PORT}")
+    print(f"Zero-Knowledge Server listening on ws://{HOST}:{PORT}")
     async with websockets.serve(manejar_cliente, HOST, PORT):
         await asyncio.Future()  # run forever
 
