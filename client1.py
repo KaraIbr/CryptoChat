@@ -1,110 +1,143 @@
+"""
+client1.py - E2E Encrypted Client using ECDH + Fernet
+
+Cryptography:
+- Key exchange: ECDH with SECP384R1 curve (ephemeral keys per session)
+- Key derivation: HKDF-SHA256 -> 32 bytes -> base64.urlsafe_b64encode
+- Encryption: Fernet (symmetric AES-128-CBC with HMAC)
+- Payload format: base64 encoded ciphertext in JSON field "payload_b64"
+
+Zero-Knowledge Server:
+- Server only routes JSON envelopes (type/from/to)
+- Server never sees plaintext, private keys, or derived symmetric keys
+"""
+
 import asyncio
 import json
+import base64
 import websockets
-from cryptography.hazmat.primitives.ciphers import rsa
-from cryptography.hazmat.primitives.ciphers.asymmetric import padding
-from cryptography.hazmat.primitives import serialization
+
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+from cryptography.fernet import Fernet
 
 SERVER = "ws://localhost:8765"
 USERNAME = "Client1"
+PEER = "Client2"
 
-from cryptography.hazmat.primitives.ciphers import rsa
-from cryptography.hazmat.primitives import serialization
 
-async def generate_keys():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_key = private_key.public_key()
-    return private_key, public_key
+def generate_ecdh_keys():
+    """Generate ephemeral EC keypair (SECP384R1) - NO hardcoded keys, NO disk writes"""
+    private_key = ec.generate_private_key(ec.SECP384R1())
+    return private_key, private_key.public_key()
 
-def get_public_key_pem(public_key):
-    return public_key.public_bytes(
+
+def public_key_to_pem(public_key) -> str:
+    pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.PKCS1
+        format=serialization.PublicFormat.SubjectPublicKeyInfo,
     )
+    return pem.decode("utf-8")
 
-def encrypt_message(message, public_key):
-    return public_key.encrypt(
-        message.encode('utf-8'),
-        padding.PKCS1v15()
-    )
 
-def decrypt_message(ciphertext, private_key):
-    return private_key.decrypt(
-        ciphertext,
-        padding.PKCS1v15()
-    ).decode('utf-8')
+def pem_to_public_key(pem_str: str):
+    return serialization.load_pem_public_key(pem_str.encode("utf-8"))
+
+
+def derive_fernet_from_ecdh(my_private_key, peer_public_key) -> Fernet:
+    """
+    Derive Fernet key from ECDH shared secret using HKDF.
+    NEVER use raw shared secret - always derive via HKDF-SHA256.
+    """
+    shared = my_private_key.exchange(ec.ECDH(), peer_public_key)
+
+    derived_32 = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=b"CryptoChat-ECDH-SECP384R1",
+    ).derive(shared)
+
+    fernet_key = base64.urlsafe_b64encode(derived_32)
+    return Fernet(fernet_key)
+
 
 async def chat():
-    private_key, my_public_key = await generate_keys()
-    peer_public_key = None
-    
+    my_priv, my_pub = generate_ecdh_keys()
+    peer_pub = None
+    fernet = None
+
     print(f"Conectando como {USERNAME}...")
     async with websockets.connect(SERVER) as ws:
-        register = {"type": "register", "from": USERNAME}
-        await ws.send(json.dumps(register))
-        print(f"Registrado como {USERNAME}")
-        
+        await ws.send(json.dumps({"type": "register", "from": USERNAME}))
+        print("Registrado.")
+
         await ws.send(json.dumps({"type": "list"}))
         response = json.loads(await ws.recv())
         print(f"Usuarios disponibles: {response.get('users', [])}")
-        
-        pubkey_pem = get_public_key_pem(my_public_key)
-        offer = {"type": "pubkey_offer", "from": USERNAME, "to": "Client2", "public_key_pem": pubkey_pem.decode()}
-        await ws.send(json.dumps(offer))
-        print("Enviando mi llave pública a Client2...")
-        
-        try:
-            response = await asyncio.wait_for(ws.recv(), timeout=10)
-            datos = json.loads(response)
-            if datos.get("type") == "pubkey_offer":
-                peer_pubkey_pem = datos.get("public_key_pem")
-                peer_public_key = serialization.load_pem_public_key(peer_pubkey_pem.encode())
-                print("Recibida llave pública de Client2")
-            elif datos.get("type") == "chat":
-                payload = bytes.fromhex(datos.get("payload", ""))
-                decrypted = decrypt_message(payload, private_key)
-                print(f"\nClient2: {decrypted}")
-        except asyncio.TimeoutError:
-            print("Esperando llave de Client2...")
-        
-        async def send_messages():
+
+        await ws.send(json.dumps({
+            "type": "pubkey_offer",
+            "from": USERNAME,
+            "to": PEER,
+            "public_key_pem": public_key_to_pem(my_pub),
+        }))
+        print(f"Enviando mi llave pública a {PEER}...")
+
+        async def receive_loop():
+            nonlocal peer_pub, fernet
+            async for raw in ws:
+                data = json.loads(raw)
+                t = data.get("type")
+
+                if t in ("pubkey_offer", "pubkey_accept"):
+                    pem = data.get("public_key_pem")
+                    if pem:
+                        peer_pub = pem_to_public_key(pem)
+                        fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+                        print(f"[OK] Llave pública recibida. Canal seguro listo con {data.get('from')}.")
+                elif t == "chat":
+                    payload_b64 = data.get("payload_b64", "")
+                    if not fernet:
+                        print("[WARN] Mensaje recibido pero aún no hay canal seguro.")
+                        continue
+                    try:
+                        ciphertext = base64.b64decode(payload_b64.encode("utf-8"))
+                        plaintext = fernet.decrypt(ciphertext).decode("utf-8")
+                        print(f"\n[peer] {plaintext}")
+                    except Exception as e:
+                        print(f"[ERROR] No se pudo descifrar: {e}")
+                elif t == "error":
+                    print(f"[SERVER ERROR] {data.get('message')}")
+                elif t == "list_result":
+                    pass
+                else:
+                    print(f"[INFO] Mensaje desconocido: {data}")
+
+        async def send_loop():
+            nonlocal fernet
             while True:
-                msg = input("Mensaje: ")
+                msg = input("Mensaje (salir para terminar): ").strip()
                 if msg.lower() == "salir":
                     break
-                if peer_public_key is None:
-                    print("No tengo la llave pública de Client2")
+                print(f"[me] {msg}")
+                if not fernet:
+                    print("Aún no hay canal seguro (esperando ECDH/pubkey).")
                     continue
-                
-                encrypted = encrypt_message(msg, peer_public_key)
-                message = {
+
+                ciphertext = fernet.encrypt(msg.encode("utf-8"))
+                payload_b64 = base64.b64encode(ciphertext).decode("utf-8")
+
+                await ws.send(json.dumps({
                     "type": "chat",
                     "from": USERNAME,
-                    "to": "Client2",
-                    "payload": encrypted.hex()
-                }
-                await ws.send(json.dumps(message))
-                print(f"Enviado a Client2")
-        
-        async def receive_messages():
-            try:
-                async for msg in ws:
-                    datos = json.loads(msg)
-                    if datos.get("type") == "chat":
-                        payload = bytes.fromhex(datos.get("payload", ""))
-                        try:
-                            decrypted = decrypt_message(payload, private_key)
-                            print(f"\nClient2: {decrypted}")
-                        except Exception as e:
-                            print(f"\nClient2 (no se pudo descifrar): {payload.hex()}")
-                    elif datos.get("type") == "pubkey_offer":
-                        peer_pubkey_pem = datos.get("public_key_pem")
-                        peer_public_key = serialization.load_pem_public_key(peer_pubkey_pem.encode())
-                        print("Recibida llave pública de Client2")
-            except websockets.exceptions.ConnectionClosed:
-                print("Conexión cerrada")
-        
-        await asyncio.gather(send_messages(), receive_messages())
+                    "to": PEER,
+                    "payload_b64": payload_b64,
+                }))
+
+        await asyncio.gather(receive_loop(), send_loop())
+
 
 if __name__ == "__main__":
     asyncio.run(chat())
