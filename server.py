@@ -1,6 +1,7 @@
 import asyncio
 import json
 import websockets
+import os
 
 HOST = "127.0.0.1"
 PORT = 8765
@@ -14,7 +15,8 @@ async def manejar_cliente(websocket):
             try:
                 datos = json.loads(mensaje)
                 tipo = datos.get("type")
-                print(f"[SERVER] {tipo} from {datos.get('from')}")
+                
+                print(f"[{tipo}] from {datos.get('from')}")
                 
                 if tipo == "register":
                     usuario_actual = datos.get("from")
@@ -31,6 +33,7 @@ async def manejar_cliente(websocket):
                     destinatario = datos.get("to")
                     if destinatario in usuarios_conectados:
                         await usuarios_conectados[destinatario].send(mensaje)
+                        print(f"[>>] Forwarded {tipo} to {destinatario}")
                     else:
                         await websocket.send(json.dumps({
                             "type": "error", 
@@ -41,6 +44,7 @@ async def manejar_cliente(websocket):
                     destinatario = datos.get("to")
                     if destinatario in usuarios_conectados:
                         await usuarios_conectados[destinatario].send(mensaje)
+                        print(f"[MSG] {usuario_actual} -> {destinatario}")
                     else:
                         await websocket.send(json.dumps({
                             "type": "error", 
@@ -60,8 +64,14 @@ async def manejar_cliente(websocket):
             print(f"[-] {usuario_actual} disconnected")
 
 async def main():
-    print(f"Server listening on ws://{HOST}:{PORT}")
-    async with websockets.serve(manejar_cliente, HOST, PORT):
+    print(f"========================================")
+    print(f"   CRYPTOCHAT SERVER - Zero Knowledge")
+    print(f"========================================")
+    print(f"Listening on: ws://{HOST}:{PORT}")
+    print(f"Keep-alive: 180 seconds")
+    print(f"----------------------------------------")
+    
+    async with websockets.serve(manejar_cliente, HOST, PORT, ping_interval=180, ping_timeout=30):
         await asyncio.Future()
 
 if __name__ == "__main__":
