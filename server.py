@@ -1,13 +1,24 @@
 """
-server.py - Servidor ciego para KimoChat
-Solo enruta paquetes - NO toca payloads cifrados ni llaves públicas
+server.py - Zero-Knowledge Relay Server (Blind Router)
+
+PROTOCOL (Zero-Knowledge):
+- Server reads ONLY JSON headers: type, from, to
+- Server NEVER decrypts payloads, manages keys, or modifies encrypted data
+- Public keys forwarded as opaque PEM strings
+- Encrypted payloads forwarded as opaque base64 strings
+
+Message types (server handles):
+- register: {"type": "register", "from": "username"}
+- list: {"type": "list"} -> returns {"type": "list_result", "users": [...]}
+- pubkey_offer / pubkey_accept: {"type": "pubkey_*", "from": "", "to": "", "public_key_pem": "PEM..."}
+- chat: {"type": "chat", "from": "", "to": "", "payload_b64": "base64..."}
 """
 
 import asyncio
 import json
 import websockets
 
-HOST = "0.0.0.0:8765"
+HOST = "0.0.0.0"
 PORT = 8765
 
 # users: username -> websocket
