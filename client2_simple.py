@@ -54,58 +54,62 @@ async def main():
             response = json.loads(await ws.recv())
             print(f"Users: {response.get('users', [])}")
             
-            async for raw in ws:
-                try:
-                    data = json.loads(raw)
-                    t = data.get("type")
-                    print(f"Received: {t}")
-                    
-                    if t == "pubkey_offer":
-                        peer_pub = pem_to_public_key(data.get("public_key_pem"))
-                        fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+            async def receiver():
+                nonlocal peer_pub, fernet
+                async for raw in ws:
+                    try:
+                        data = json.loads(raw)
+                        t = data.get("type")
+                        print(f"Received: {t}")
                         
+                        if t == "pubkey_offer":
+                            peer_pub = pem_to_public_key(data.get("public_key_pem"))
+                            fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+                            
+                            await ws.send(json.dumps({
+                                "type": "pubkey_accept",
+                                "from": USERNAME,
+                                "to": PEER,
+                                "public_key_pem": public_key_to_pem(my_pub),
+                            }))
+                            print("Secure channel ready!")
+                            
+                        elif t == "pubkey_accept":
+                            peer_pub = pem_to_public_key(data.get("public_key_pem"))
+                            fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
+                            print("Secure channel ready!")
+                            
+                        elif t == "chat":
+                            if not fernet:
+                                print("No secure channel yet")
+                                continue
+                            ciphertext = base64.b64decode(data.get("payload_b64", ""))
+                            plaintext = fernet.decrypt(ciphertext).decode("utf-8")
+                            print(f"[peer] {plaintext}")
+                            
+                        elif t == "error":
+                            print(f"Error: {data.get('message')}")
+                            
+                    except json.JSONDecodeError:
+                        pass
+            
+            async def sender():
+                while True:
+                    await asyncio.sleep(0.2)
+                    if fernet:
+                        msg = input("Message: ")
+                        if msg.lower() == "salir":
+                            break
+                        ciphertext = fernet.encrypt(msg.encode("utf-8"))
+                        payload_b64 = base64.b64encode(ciphertext).decode("utf-8")
                         await ws.send(json.dumps({
-                            "type": "pubkey_accept",
+                            "type": "chat",
                             "from": USERNAME,
                             "to": PEER,
-                            "public_key_pem": public_key_to_pem(my_pub),
+                            "payload_b64": payload_b64,
                         }))
-                        print("Secure channel ready!")
-                        
-                    elif t == "pubkey_accept":
-                        peer_pub = pem_to_public_key(data.get("public_key_pem"))
-                        fernet = derive_fernet_from_ecdh(my_priv, peer_pub)
-                        print("Secure channel ready!")
-                        
-                    elif t == "chat":
-                        if not fernet:
-                            print("No secure channel yet")
-                            continue
-                        ciphertext = base64.b64decode(data.get("payload_b64", ""))
-                        plaintext = fernet.decrypt(ciphertext).decode("utf-8")
-                        print(f"[peer] {plaintext}")
-                        
-                    elif t == "error":
-                        print(f"Error: {data.get('message')}")
-                        
-                except json.JSONDecodeError:
-                    pass
-                    
-            while True:
-                if fernet:
-                    msg = input("Message: ")
-                    if msg.lower() == "salir":
-                        break
-                    ciphertext = fernet.encrypt(msg.encode("utf-8"))
-                    payload_b64 = base64.b64encode(ciphertext).decode("utf-8")
-                    await ws.send(json.dumps({
-                        "type": "chat",
-                        "from": USERNAME,
-                        "to": PEER,
-                        "payload_b64": payload_b64,
-                    }))
-                else:
-                    await asyncio.sleep(0.5)
+            
+            await asyncio.gather(receiver(), sender())
                     
     except Exception as e:
         print(f"Error: {type(e).__name__}: {e}")
